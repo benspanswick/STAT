@@ -1,0 +1,219 @@
+---
+title: "project1"
+author: "Ben Spanswick"
+date: "October 1, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#install.packages("corrplot")
+#install.packages("HotDeckImputation")
+#install.packages("impute")
+#install.packages("olsrr")
+#install.packages("Hmisc")
+#install.packages("coefplot")
+#install.packages("glmnet")
+
+library(glmnet)
+library(ggplot2)
+library(data.table)
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(corrplot)
+library(DMwR)
+library(mice)
+library(HotDeckImputation)
+#library(impute)
+library(Hmisc)
+library(glmnet)
+library(coefplot)
+library(olsrr)
+
+
+```
+
+INTRO HERE
+
+```{r}
+
+
+getwd() #check working directory
+
+test <- read.csv("test.csv", header = TRUE, sep = ",") #import test
+train <- read.csv("train.csv", header = TRUE, sep = ",") #import train
+train_imputed <- read.csv("imputed_train.csv", header = TRUE, sep = ",") #import train
+
+train_imputed_original <- train_imputed
+test_original <- test
+train_original <- train
+
+```
+
+### Data Structure
+
+in the following output we are able to get our head around the dimensions, structure, and content of the data. For starters we can see that this is a large data set. We have 30,471 observations and 292 variables. We know from the data dictionary that "price_doc" is the target variable for this dataset. Lets focus on that for a moment:
+
+```{r}
+dim(train)
+str(train)
+names(train)
+head(train$price_doc)
+```
+
+Lets just take a quick look at a scatter plot to check for intial outliers. The data looks pretty good, there may be a few houtliers in the data, we will examine those shortly. 
+
+```{r}
+head(train$price_doc)
+
+ggplot(train, aes(x=id, y=price_doc)) + geom_point()
+
+```
+
+A simple histogram plot of Price reveals some pretty serious skew. Lets look at a log transformation of price to help fix this.
+
+```{r}
+ggplot(train, aes(x=price_doc)) + geom_histogram(bins=100)
+```
+
+The histogram of the log trasformed data looks much better. We will procede with the log transformed data. 
+
+
+
+```{r}
+
+ggplot(train, aes(x=log(price_doc))) + geom_histogram(bins=50)
+
+
+```
+
+Now its time to look at the rest of the data. We noticed a lot of missing variables while in the discovery phase. Lets map out where those missing variables are:
+
+```{r}
+
+miss_pct <- map_dbl(train, function(x) { round((sum(is.na(x)) / length(x)) * 100, 1) })
+
+miss_pct <- miss_pct[miss_pct > 0]
+
+data.frame(miss=miss_pct, var=names(miss_pct), row.names=NULL) %>%
+    ggplot(aes(x=reorder(var, -miss), y=miss)) + 
+    geom_bar(stat='identity', fill='darkgreen') +
+    labs(x='', y='%', title='Missing Data by Feature') +
+    theme(axis.text.x=element_text(angle=90, hjust=1))
+
+```
+
+As we can see there is a lot of missing data (nearly 50%) for some of the features, wheras others have very little. Its obvious that we cannot use the data as is, so lets do some kind of imputation. I played around with a lot of different kinds of imputation for this project...
+
+```{r}
+# sum(is.na(train$price_doc)) #just making sure there are no NA prices to that the KNN imputation doesn't affect this column. 
+
+# train_df <- data.frame(train)
+
+# train_mice <- mice(train_df, method="pmm", m=1)
+```
+
+Importing the imputed data that was done in python:
+
+```{r}
+train_imputed <- train_imputed[complete.cases(train_imputed), ]
+
+colnames(train_imputed)
+
+train_imputed <- train_imputed[, -c(0:2)]
+
+
+```
+
+
+
+need to do a corr plot
+
+```{r}
+
+#Got to figure out this corr plot with. work in progress
+
+#M <- cor(train_imputed.subset)
+#corrplot(M, method = "circle")
+
+
+```
+
+HIGH LEVEL VARIABLE SELECTION AND INTIAL LM FITTING
+
+
+```{r}
+
+# Lets us apply a standard LM model to the data for some high level variable selection...
+
+full <- lm(formula = price_doc ~ ., data = train_imputed)
+
+toselect.x <- summary(full)$coeff[-1,4] < 0.0001 #we can eddit this as needed. 
+
+relevant.x <- names(toselect.x)[toselect.x == TRUE] # select sig. features. 
+
+print(relevant.x) #lets just check what are releveant features are.
+
+#this is a bit of cleaning, may need to be modified if new variables are introduced. 
+
+r.X <- gsub("sub_area.*", "sub_area", relevant.x)
+r.X <- gsub("product_type.*", "product_type", r.X)
+r.X <- gsub("railroad_1line.*", "railroad_1line", r.X)
+r.X <- r.X[!duplicated(r.X)]
+print(r.X)
+
+#Creating a subset data set with only the features we care about for future modeling.
+
+names.use <- names(train_imputed)[(names(train_imputed) %in% r.X)]
+
+names.use <- c(names.use[], "price_doc")
+
+train_imputed.subset <- train_imputed[, names.use]
+
+colnames(train_imputed.subset)
+
+# formula with only sig variables
+
+sig.formula <- as.formula(paste("log(price_doc) ~",paste(r.X, collapse= "+")))
+
+#lets make sure the formula for our lm is correct
+
+print(sig.formula)
+
+#Aplying LM to our imputed data
+
+sig.model <- lm(formula=sig.formula,data=train_imputed)
+
+summary(sig.model)
+
+
+
+```
+
+
+LASSO SELECTION
+
+```{r}
+
+y <- train_imputed.subset$price_doc
+xfactors <- model.matrix(sig.model)[, -1]
+x <- as.matrix(data.frame(xfactors))
+
+
+lasso.mod <-glmnet(x, y, alpha=1)
+summary(lasso.mod)
+
+par(mfrow=c(1,2))
+plot.glmnet(lasso.mod, xvar = "lambda", label = 5)
+
+plot.glmnet(lasso.mod, xvar="dev",label=5)
+
+
+```
+
+
+
+
+
